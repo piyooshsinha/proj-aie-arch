@@ -1,0 +1,5 @@
+{"id": "refund-eu", "query": "How long do refunds take for EU orders?", "expected_keywords": ["14 days"]}
+{"id": "refund-us", "query": "What is the refund window for US orders?", "expected_keywords": ["30 days"]}
+{"id": "office-hours", "query": "When does the Berlin office open?", "expected_keywords": ["9am"]}
+{"id": "out-of-scope", "query": "What is the airspeed velocity of an unladen swallow?", "expected_keywords": []}
+{"id": "ambiguous", "query": "How long does it take?", "expected_keywords": []}
