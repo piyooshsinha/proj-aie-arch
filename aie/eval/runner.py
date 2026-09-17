@@ -283,7 +283,14 @@ def main(argv: list[str] | None = None) -> int:
 
     configure_logging(json_format=True)
     platform = build_platform()
-    cases = load_cases(args.dataset)
+    try:
+        cases = load_cases(args.dataset)
+    except FileNotFoundError:
+        print(f"no such dataset: {args.dataset}", file=sys.stderr)
+        return 2
+    except json.JSONDecodeError as exc:
+        print(f"{args.dataset} is not valid JSONL: {exc}", file=sys.stderr)
+        return 2
     if not cases:
         print(f"no cases in {args.dataset}", file=sys.stderr)
         return 2
