@@ -4,7 +4,7 @@ import pytest
 
 from aie.config import Settings, build_platform
 from aie.gateway.providers.echo import EchoProvider
-from aie.observe.trace import METRICS
+from aie.observe.trace import METRICS, TRACES
 from aie.store.memory import Document
 from aie.types import GenerationRequest, GenerationResult
 
@@ -42,10 +42,14 @@ class ScriptedProvider:
 
 
 @pytest.fixture(autouse=True)
-def reset_metrics():
+def reset_observability():
+    # METRICS and TRACES are process-global; a leaked trace or counter from one
+    # test makes another test's assertions lie.
     METRICS.reset()
+    TRACES.clear()
     yield
     METRICS.reset()
+    TRACES.clear()
 
 
 @pytest.fixture

@@ -10,7 +10,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Query as QueryParam
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
 from aie.config import Platform, build_platform
@@ -96,6 +97,7 @@ def create_app(platform: Platform | None = None) -> FastAPI:
     async def metrics(p: Platform = Depends(get_platform)) -> dict[str, Any]:
         return {
             "counters": METRICS.snapshot(),
+            "histograms": METRICS.histogram_summary(),
             "response_cache": {
                 "hits": p.cache.hits,
                 "misses": p.cache.misses,
@@ -105,6 +107,76 @@ def create_app(platform: Platform | None = None) -> FastAPI:
             "action_cache": {
                 "hits": p.read_actions.cache.hits,
                 "misses": p.read_actions.cache.misses,
+            },
+            "traces_buffered": len(p.traces),
+        }
+
+    @app.get("/metrics/prometheus", response_class=PlainTextResponse)
+    async def prometheus_metrics() -> str:
+        """Scrape endpoint. Point a Prometheus job at this path."""
+        return METRICS.prometheus()
+
+    # --- traces ------------------------------------------------------------
+
+    @app.get("/traces")
+    async def list_traces(
+        limit: int = QueryParam(20, ge=1, le=200),
+        errors_only: bool = False,
+        p: Platform = Depends(get_platform),
+    ) -> list[dict[str, Any]]:
+        """Recent traces, newest first, with their cost/latency attribution."""
+        return [
+            {"trace_id": t.trace_id, **t.attributes, **t.summary()}
+            for t in p.traces.recent(limit, errors_only=errors_only)
+        ]
+
+    @app.get("/traces/{trace_id}")
+    async def get_trace(
+        trace_id: str,
+        format: str = QueryParam("tree", pattern="^(tree|otlp|summary)$"),
+        p: Platform = Depends(get_platform),
+    ) -> dict[str, Any]:
+        trace = p.traces.get(trace_id)
+        if trace is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"no trace {trace_id!r} in the buffer (it holds the most recent {len(p.traces)})",
+            )
+        if format == "otlp":
+            return trace.to_otlp()
+        if format == "summary":
+            return {"trace_id": trace.trace_id, **trace.attributes, **trace.summary()}
+        return trace.to_dict()
+
+    @app.get("/scores")
+    async def scores(p: Platform = Depends(get_platform)) -> dict[str, Any]:
+        """Online scoring results, rolled up from the metrics registry."""
+        counters = METRICS.snapshot()
+        rollup: dict[str, dict[str, float]] = {}
+        for key, value in counters.items():
+            if not key.startswith("score.result{"):
+                continue
+            tags = dict(
+                pair.split("=", 1)
+                for pair in key[len("score.result{"):-1].split(",")
+            )
+            entry = rollup.setdefault(tags.get("scorer", "?"), {"pass": 0.0, "fail": 0.0})
+            entry[tags.get("outcome", "pass")] += value
+
+        return {
+            "scorers": p.scorer.scorer_names if p.scorer else [],
+            "sample_rate": p.scorer.sample_rate if p.scorer else 0.0,
+            "judge_sample_rate": p.scorer.judge_sample_rate if p.scorer else 0.0,
+            "results": {
+                name: {
+                    **counts,
+                    "pass_rate": round(
+                        counts["pass"] / (counts["pass"] + counts["fail"]), 4
+                    )
+                    if (counts["pass"] + counts["fail"])
+                    else None,
+                }
+                for name, counts in sorted(rollup.items())
             },
         }
 

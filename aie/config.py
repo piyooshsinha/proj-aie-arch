@@ -15,12 +15,15 @@ from aie.actions.write import WriteActionRegistry
 from aie.cache.response import ResponseCache, Scope
 from aie.context.construction import ContextConfig, ContextConstructor
 from aie.context.retrieval import KeywordRetriever
+from aie.eval.online import OnlineScorer
+from aie.eval.scorers import HEURISTIC_SCORERS, LLMJudge
 from aie.gateway.catalog import ANTHROPIC_MODELS, ModelCatalog, Route, local_model
 from aie.gateway.gateway import ModelGateway
 from aie.gateway.providers.base import Provider
 from aie.guardrails.base import GuardrailChain
 from aie.guardrails.input import PIIRedaction, PromptInjectionHeuristic
 from aie.guardrails.output import NonEmptyOutput, PIILeakCheck, StructuredOutput
+from aie.observe.trace import TRACES, TraceStore
 from aie.pipeline import Pipeline, PipelineConfig
 from aie.store.memory import ChatHistoryStore, Document, DocumentStore
 from aie.types import Query
@@ -56,6 +59,14 @@ class Settings:
     max_iterations: int = field(
         default_factory=lambda: int(os.getenv("AIE_MAX_ITERATIONS", "2"))
     )
+    # Heuristic scoring is free, so it defaults to every request. The judge
+    # costs a generation per call, so it defaults to off.
+    score_sample_rate: float = field(
+        default_factory=lambda: float(os.getenv("AIE_SCORE_SAMPLE_RATE", "1.0"))
+    )
+    judge_sample_rate: float = field(
+        default_factory=lambda: float(os.getenv("AIE_JUDGE_SAMPLE_RATE", "0.0"))
+    )
 
     @property
     def has_anthropic_credentials(self) -> bool:
@@ -68,11 +79,13 @@ class Platform:
 
     pipeline: Pipeline
     gateway: ModelGateway
+    scorer: OnlineScorer
     documents: DocumentStore
     history: ChatHistoryStore
     cache: ResponseCache
     read_actions: ReadOnlyActionRegistry
     write_actions: WriteActionRegistry
+    traces: TraceStore
     settings: Settings
 
 
@@ -152,6 +165,13 @@ def build_platform(
     )
     gateway = ModelGateway(build_catalog(settings), providers or build_providers(settings))
 
+    scorer = OnlineScorer(
+        HEURISTIC_SCORERS,
+        sample_rate=settings.score_sample_rate,
+        judge=LLMJudge(gateway) if settings.judge_sample_rate > 0 else None,
+        judge_sample_rate=settings.judge_sample_rate,
+    )
+
     pipeline = Pipeline(
         gateway=gateway,
         context=context,
@@ -161,16 +181,19 @@ def build_platform(
         output_guardrails_for=output_guardrails_for,
         cache=cache,
         history=history,
+        scorer=scorer,
         config=PipelineConfig(max_iterations=settings.max_iterations),
     )
 
     return Platform(
         pipeline=pipeline,
         gateway=gateway,
+        scorer=scorer,
         documents=document_store,
         history=history,
         cache=cache,
         read_actions=read_actions,
         write_actions=WriteActionRegistry(),
+        traces=TRACES,
         settings=settings,
     )

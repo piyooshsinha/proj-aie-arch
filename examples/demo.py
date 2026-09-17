@@ -1,8 +1,11 @@
 """Dev server with the echo provider, so the HTTP path can be exercised offline."""
 from aie.api.app import create_app
+from aie.observe.logging import configure_logging
 from aie.config import Settings, build_platform
 from aie.gateway.providers.echo import EchoProvider
 from aie.store.memory import Document
+
+configure_logging()
 
 platform = build_platform(
     Settings(primary="local", local_model="demo"),

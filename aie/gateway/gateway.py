@@ -17,6 +17,7 @@ import random
 
 from aie.gateway.catalog import ModelCatalog, ModelSpec
 from aie.gateway.providers.base import Provider, ProviderError, ProviderRefusal
+from aie.observe.metrics import COST_BUCKETS_USD, TOKEN_BUCKETS
 from aie.observe.trace import METRICS, Trace
 from aie.types import GenerationRequest, GenerationResult, Message
 
@@ -97,9 +98,25 @@ class ModelGateway:
             result.cost_usd = spec.cost(result.input_tokens, result.output_tokens)
             if trace is not None:
                 trace.add_cost(result.cost_usd)
+
+            labels = {"model": spec.model_id, "provider": spec.provider, "route": route}
             METRICS.incr("gateway.tokens.input", result.input_tokens, model=spec.model_id)
             METRICS.incr("gateway.tokens.output", result.output_tokens, model=spec.model_id)
             METRICS.incr("gateway.cost_usd", result.cost_usd, model=spec.model_id)
+            # Histograms, because "what is p95 generation latency" is not a
+            # question a counter can answer.
+            METRICS.observe("gateway.latency.seconds", result.latency_ms / 1000.0, **labels)
+            METRICS.observe(
+                "gateway.cost.usd", result.cost_usd, buckets=COST_BUCKETS_USD, **labels
+            )
+            METRICS.observe(
+                "gateway.tokens.output.count",
+                result.output_tokens,
+                buckets=TOKEN_BUCKETS,
+                **labels,
+            )
+            if position > 0:
+                METRICS.incr("gateway.served_by_fallback", model=spec.model_id)
             return result
 
         raise GatewayError(

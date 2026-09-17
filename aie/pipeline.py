@@ -23,9 +23,12 @@ import logging
 from dataclasses import dataclass
 
 from aie.cache.response import ResponseCache
+from aie.eval.online import OnlineScorer
+from aie.eval.types import EvalSample
 from aie.context.construction import ContextConstructor
 from aie.gateway.gateway import GatewayError, ModelGateway
 from aie.guardrails.base import GuardrailChain, first_stop
+from aie.observe.logging import bind_trace
 from aie.observe.trace import METRICS, Trace
 from aie.store.memory import ChatHistoryStore
 from aie.types import (
@@ -61,6 +64,7 @@ class Pipeline:
         output_guardrails_for,
         cache: ResponseCache,
         history: ChatHistoryStore,
+        scorer: OnlineScorer | None = None,
         config: PipelineConfig | None = None,
     ) -> None:
         self._gateway = gateway
@@ -71,7 +75,18 @@ class Pipeline:
         self._output_guardrails_for = output_guardrails_for
         self._cache = cache
         self._history = history
+        # Optional by design: scoring must be addable and removable without
+        # the request path noticing.
+        self._scorer = scorer
         self.config = config or PipelineConfig()
+
+    @property
+    def context(self) -> ContextConstructor:
+        return self._context
+
+    @property
+    def scorer(self) -> OnlineScorer | None:
+        return self._scorer
 
     async def run(self, query: Query, *, trace: Trace | None = None) -> PipelineResponse:
         trace = trace or Trace(
@@ -79,6 +94,12 @@ class Pipeline:
         )
         guardrail_results: list[GuardrailResult] = []
 
+        with bind_trace(
+            trace.trace_id, tenant_id=query.tenant_id, user_id=query.user_id
+        ):
+            return await self._run(query, trace, guardrail_results)
+
+    async def _run(self, query, trace, guardrail_results) -> PipelineResponse:
         try:
             # 1. Response cache, before anything expensive.
             with trace.span("cache.lookup", scope=self._cache.scope) as span:
@@ -153,7 +174,8 @@ class Pipeline:
                 stop = first_stop(output_results)
                 if stop is None:
                     return self._succeed(
-                        query, final_text, result, trace, guardrail_results, iteration
+                        query, final_text, result, trace, guardrail_results,
+                        iteration, context,
                     )
 
                 if stop.action is GuardrailAction.RETRY and iteration < self.config.max_iterations:
@@ -188,7 +210,7 @@ class Pipeline:
             trace.emit()
 
     def _succeed(
-        self, query, text, result, trace, guardrail_results, iteration
+        self, query, text, result, trace, guardrail_results, iteration, context
     ) -> PipelineResponse:
         if self.config.cache_responses:
             self._cache.set(query, text, model=result.model)
@@ -201,6 +223,27 @@ class Pipeline:
             )
         trace.finish()
         METRICS.incr("pipeline.ok", route=query.route)
+        METRICS.observe(
+            "pipeline.latency.seconds", trace.latency_ms / 1000.0, route=query.route
+        )
+
+        # Scoring happens after the answer is final and never touches it.
+        if self._scorer is not None:
+            try:
+                self._scorer.observe(
+                    EvalSample(
+                        query=query.text,
+                        response=text,
+                        chunks=context.chunks,
+                        latency_ms=trace.latency_ms,
+                        cost_usd=trace.cost_usd,
+                        route=query.route,
+                    ),
+                    trace=trace,
+                )
+            except Exception:
+                logger.exception("online scoring failed; response is unaffected")
+
         return PipelineResponse(
             text=text,
             trace_id=trace.trace_id,
